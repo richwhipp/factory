@@ -1,0 +1,31 @@
+name: Release
+
+# Pushing a tag vX.Y.Z publishes the single-file CLI bundle as a release download.
+# Repos' CI pins a version and its SHA-256 (see the Template's CI).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run verify
+      - name: Publish the bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum factory.mjs > factory.mjs.sha256
+          gh release create "$GITHUB_REF_NAME" factory.mjs factory.mjs.sha256 \
+            --title "$GITHUB_REF_NAME" --notes "factory CLI $GITHUB_REF_NAME"

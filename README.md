@@ -14,3 +14,7 @@ scripts/install.sh   # build, then register the hooks in ~/.claude/settings.json
 ## Cloud sessions
 
 Paste `scripts/cloud-setup.sh` into the Factory's Claude Code on the web environment as its setup script.
+
+## Releases
+
+Pushing a tag `vX.Y.Z` publishes `factory.mjs` (and its `.sha256`) as a GitHub release. A Repo's CI downloads a pinned version and checks its SHA-256 before running it, for example `factory.mjs order-check`.
