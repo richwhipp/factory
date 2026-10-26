@@ -7,7 +7,8 @@ await build({
   platform: "node",
   format: "esm",
   target: "node22",
-  outfile: "dist/factory.mjs",
+  // An override lets you build a candidate without replacing the installed bundle.
+  outfile: process.env.FACTORY_OUTFILE ?? "dist/factory.mjs",
   // Bundled CommonJS dependencies (yaml) call require(); give the ESM bundle one.
   banner: {
     js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);',

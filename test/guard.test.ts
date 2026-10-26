@@ -73,6 +73,15 @@ describe("guard: file edits", () => {
     expect(write(".factory/spec.md", "acceptance").denied).toBe(true);
   });
 
+  it("denies every agent, the Acceptance subagent included, editing CI workflows", () => {
+    expect(write(".github/workflows/ci.yml").denied).toBe(true);
+    expect(write(".github/workflows/ci.yml", "acceptance").denied).toBe(true);
+    expect(write(".github/workflows/ci.yml").reason).toMatch(/Operator's call/);
+    expect(write(".github/dependabot.yml").denied).toBe(false);
+    expect(bash("sed -i 's/order-check/true/' .github/workflows/ci.yml").denied).toBe(true);
+    expect(bash("cat .github/workflows/ci.yml").denied).toBe(false);
+  });
+
   it("does not let another subagent pass as the Acceptance subagent", () => {
     expect(write("acceptance/notes.spec.ts", "review").denied).toBe(true);
   });

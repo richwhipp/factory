@@ -15,6 +15,8 @@ export type Decision = { allow: true } | { allow: false; reason: string };
 /** The subagent allowed to write Acceptance tests. */
 export const ACCEPTANCE_AGENT = "acceptance";
 
+const WORKFLOWS = ".github/workflows";
+
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const caseInsensitive = process.platform === "win32";
 const norm = (p: string) => {
@@ -27,7 +29,8 @@ const deny = (reason: string): Decision => ({ allow: false, reason });
 
 /**
  * Decides whether a tool call may run. In a Factory Repo, only the Acceptance subagent
- * may change the Acceptance tests, nobody may change the Spec, and nobody may force-push.
+ * may change the Acceptance tests, no agent may change the Spec or the CI workflows, and
+ * nobody may force-push.
  */
 export function decide(input: HookInput, env: NodeJS.ProcessEnv = process.env): Decision {
   const tool = input.tool_name ?? "";
@@ -81,6 +84,11 @@ function protectedFor(
     {
       rel: norm(SPEC),
       reason: "The Spec (.factory/spec.md) is read-only; changing it is the Operator's call.",
+    },
+    {
+      // CI runs the PR's own workflows, so an agent editing them could make any check pass.
+      rel: norm(WORKFLOWS),
+      reason: `CI workflows (${WORKFLOWS}/) are read-only to agents; changing CI is the Operator's call.`,
     },
   ];
   if (!isAcceptanceAgent) {
