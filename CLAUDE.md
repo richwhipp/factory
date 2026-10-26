@@ -7,9 +7,11 @@ The AI Software Factory's tooling: the `factory` CLI (the deterministic core the
 - `src/cli.ts`: entry point; dispatches subcommands.
 - `src/guard.ts`: `factory guard`, the PreToolUse hook.
 - `src/repo.ts`: finds a Repo by its Repo manifest (`.factory/repo.yml`) and reads it.
+- `src/order-check.ts`, `src/contract-check.ts`: the CI order check and the Contract check.
+- `src/github.ts`: the REST-only GitHub client; `src/shell.ts` runs a Repo's declared commands (POSIX shell, no stdin, process-tree kill on timeout); `src/labels.ts`: the Factory's labels.
 - `src/install.ts`: `factory install`, which registers the hooks in user-level Claude Code settings.
 - `build.mjs`: bundles everything into `dist/factory.mjs`, a single file that needs no `node_modules` at runtime.
-- `test/`: black-box tests. `test/run.ts` runs the built bundle as a separate process and builds fixture Repos on disk.
+- `test/`: black-box tests. `test/run.ts` runs the built bundle as a separate process (`factoryAsync` when it talks to a fake server) and builds fixture Repos on disk; `test/fake-github.ts` is an in-memory GitHub REST server that records every call.
 - `scripts/install.sh`: the one install step (build, then register hooks). `scripts/cloud-setup.sh`: the cloud environment's setup script.
 
 ## Commands

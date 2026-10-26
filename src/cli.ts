@@ -1,5 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { contractCheck } from "./contract-check.ts";
+import { GitHub } from "./github.ts";
 import { decide, type HookInput } from "./guard.ts";
 import { defaultClaudeDir, install } from "./install.ts";
 import { type OrderResult, orderCheck } from "./order-check.ts";
@@ -15,6 +18,11 @@ Commands:
             CI check for the current branch: Acceptance commits first, then nothing touches
             the Acceptance tests or the Spec. Exit 1 on a violation.
             [--base <ref>]  (default: origin/<default_branch>, else <default_branch>)
+  contract-check
+            Does this Repo meet the Repo contract? Runs Setup and Verify on a clean
+            checkout of HEAD and checks GitHub. Exit 1 if any rule fails.
+            [--repo <owner/name>]  (default: from the origin remote)
+            [--timeout <seconds>]  per declared command (default 1800)
 `;
 
 const option = (args: string[], name: string) => {
@@ -46,6 +54,35 @@ function runOrderCheck(args: string[]): number {
   return 1;
 }
 
+async function runContractCheck(args: string[]): Promise<number> {
+  // The git root, not the manifest: a Repo without a manifest is what this check reports.
+  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (top.status !== 0) {
+    process.stderr.write("contract-check: not inside a git repository\n");
+    return 2;
+  }
+  const result = await contractCheck(top.stdout.trim(), {
+    github: GitHub.fromEnv(),
+    timeoutSeconds: Number(option(args, "--timeout") ?? 1800),
+    slug: option(args, "--repo"),
+  });
+  const version = JSON.stringify(result.contractVersion);
+  console.log(
+    `contract-check: ${result.slug ?? "(no GitHub remote)"}, contract_version ${version}`,
+  );
+  for (const r of result.rules) {
+    const detail = r.detail ? `: ${r.detail.replace(/\n/g, "\n        ")}` : "";
+    console.log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.rule}${detail}`);
+  }
+  const failed = result.rules.filter((r) => !r.ok).length;
+  console.log(
+    failed
+      ? `contract-check: failed (${failed} of ${result.rules.length} rules)`
+      : "contract-check: ok",
+  );
+  return failed ? 1 : 0;
+}
+
 function guard(): number {
   let input: HookInput;
   try {
@@ -71,13 +108,15 @@ function printDeny(reason: string) {
   );
 }
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
   switch (command) {
     case "guard":
       return guard();
     case "order-check":
       return runOrderCheck(rest);
+    case "contract-check":
+      return runContractCheck(rest);
     case "install": {
       const claudeDir = option(rest, "--claude-dir") ?? defaultClaudeDir();
       const file = install(claudeDir, fileURLToPath(import.meta.url));
@@ -90,4 +129,4 @@ function main(argv: string[]): number {
   }
 }
 
-process.exitCode = main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2));
