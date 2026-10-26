@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { findRepoRoot, readManifest, SPEC } from "./repo.ts";
 
@@ -41,11 +42,7 @@ export function decide(input: HookInput, env: NodeJS.ProcessEnv = process.env): 
   if (tool === "Bash") {
     const command = String(input.tool_input?.command ?? "");
     if (isForcePush(command)) return deny("Force-pushing is not allowed in a Factory Run.");
-    const root = findRepoRoot(cwd);
-    if (!root) return allow;
-    const protectedPaths = protectedFor(root, isAcceptanceAgent);
-    if ("error" in protectedPaths) return deny(protectedPaths.error);
-    return checkBash(command, root, cwd, protectedPaths.paths);
+    return checkBash(command, cwd, isAcceptanceAgent);
   }
 
   if (EDIT_TOOLS.has(tool)) {
@@ -251,36 +248,80 @@ function isReadOnly(t: string[]): boolean {
   return name === "factory";
 }
 
-function checkBash(command: string, root: string, cwd: string, paths: Protected[]): Decision {
-  const relCwd = norm(relative(root, cwd));
-  const absRoot = norm(root);
-  // Working inside a protected directory, any command may touch it.
-  const cwdHit = paths.find((p) => within(relCwd, p.rel));
-  const named = (ws: string[]) =>
-    ws.length === 0
-      ? undefined
-      : (cwdHit ?? paths.find((p) => ws.some((w) => mentions(norm(w), p.rel, relCwd, absRoot))));
-  const blocked = (s: Segment, hit: Protected) =>
-    deny(`${hit.reason} (Bash command touching it: \`${s.text}\`)`);
+/**
+ * Commands that can wipe a protected path by naming a directory above it (`rm -rf .`,
+ * `git checkout main -- .`). Commands that only drop untracked or uncommitted work
+ * (`git clean`, `git reset`, `git stash`) are left out: builders can't create files in a
+ * protected path, and committed Acceptance tests survive them.
+ */
+const GIT_WIPERS = new Set("checkout restore rm mv".split(" "));
 
-  for (const s of segments(command)) {
-    // Writing to a protected path through a redirect, whatever the command.
-    const targetHit = named(s.targets.filter((t) => !cwdHit || !isAbsolute(t)));
-    if (s.targets.length && targetHit) return blocked(s, targetHit);
-    const hit = named(s.words);
-    if (hit && !isReadOnly(s.words)) return blocked(s, hit);
-  }
-  return allow;
+function isWiper(t: string[]): boolean {
+  const name = (t[0] ?? "").replace(/^.*\//, "");
+  if (["rm", "rmdir", "mv", "shred", "truncate"].includes(name)) return true;
+  if (name === "find") return !isReadOnly(t);
+  return name === "git" && GIT_WIPERS.has(t.slice(1).find((a) => !a.startsWith("-")) ?? "");
 }
 
-/** Whether a normalised word names a protected path: from the root, the cwd, or absolutely. */
-function mentions(segment: string, rel: string, relCwd: string, absRoot: string): boolean {
-  const forms = new Set([rel, `${absRoot}/${rel}`]);
-  if (relCwd && relCwd !== "." && rel.startsWith(`${relCwd}/`)) {
-    forms.add(rel.slice(relCwd.length + 1));
+/** A shell word as a native path: Git Bash's `/c/...` becomes `C:/...`, and `~` the home directory. */
+function toNative(word: string): string {
+  if (word === "~" || word.startsWith("~/")) return homedir() + word.slice(1);
+  const msys = /^\/([a-zA-Z])(\/|$)/.exec(word);
+  if (process.platform === "win32" && msys) return `${msys[1]}:/${word.slice(3)}`;
+  return word;
+}
+
+/** The path-like parts of a word: the word itself (minus any glob) and whatever follows `=`. */
+function pathParts(word: string): string[] {
+  const parts = word.startsWith("-") ? [] : [word];
+  const eq = word.indexOf("=");
+  if (eq !== -1) parts.push(word.slice(eq + 1));
+  return parts.map((p) => p.replace(/[*?[].*$/, "") || ".");
+}
+
+/**
+ * Checks each simple command against the Factory Repo its paths land in. Follows `cd`, so
+ * a command can't escape by changing directory or by naming another Repo absolutely.
+ */
+function checkBash(command: string, startCwd: string, isAcceptanceAgent: boolean): Decision {
+  const cache = new Map<string, ReturnType<typeof protectedFor>>();
+  const protectedAt = (root: string) => {
+    if (!cache.has(root)) cache.set(root, protectedFor(root, isAcceptanceAgent));
+    return cache.get(root) as ReturnType<typeof protectedFor>;
+  };
+  /** The protected path an absolute path falls in (or, with `above`, sits above), or a denial. */
+  const hitAt = (abs: string, above: boolean): Protected | Decision | undefined => {
+    const root = findRepoRoot(abs);
+    if (!root) return undefined;
+    const p = protectedAt(root);
+    if ("error" in p) return deny(p.error);
+    const rel = norm(relative(root, abs));
+    return p.paths.find((x) => within(rel, x.rel) || (above && (rel === "" || within(x.rel, rel))));
+  };
+  const blocked = (s: Segment, hit: Protected | Decision) =>
+    "allow" in hit ? hit : deny(`${hit.reason} (Bash command touching it: \`${s.text}\`)`);
+
+  let cwd = startCwd;
+  for (const s of segments(command)) {
+    if (s.words[0] === "cd") {
+      cwd = resolve(cwd, toNative(s.words[1] ?? homedir()));
+      continue;
+    }
+    // Working inside a protected directory, any command that isn't read-only may touch it.
+    const here = hitAt(cwd, false);
+    for (const t of s.targets) {
+      const hit = here ?? hitAt(resolve(cwd, toNative(t)), false);
+      if (hit) return blocked(s, hit);
+    }
+    if (isReadOnly(s.words)) continue;
+    if (here) return blocked(s, here);
+    const above = isWiper(s.words);
+    for (const word of s.words.slice(1)) {
+      for (const part of pathParts(word)) {
+        const hit = hitAt(resolve(cwd, toNative(part)), above);
+        if (hit) return blocked(s, hit);
+      }
+    }
   }
-  const escapeRegExp = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return [...forms].some((f) =>
-    new RegExp(`(^|[\\s'"=:(])(\\./)?${escapeRegExp(f)}(/|$|[\\s'")])`).test(segment),
-  );
+  return allow;
 }

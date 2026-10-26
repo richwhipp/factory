@@ -195,6 +195,45 @@ describe("guard: Bash", () => {
     expect(bash("pnpm run verify && git commit -am 'Build notes'").denied).toBe(false);
   });
 
+  it("follows cd and absolute paths into a Factory Repo from anywhere", () => {
+    const elsewhere = fixtureRepo(null);
+    const posix = repo.replace(/\\/g, "/");
+    expect(
+      bash(`cd ${posix} && printf '' >> .github/workflows/ci.yml`, undefined, elsewhere).denied,
+    ).toBe(true);
+    expect(bash(`cd "${posix}/acceptance" && rm notes.spec.ts`, undefined, elsewhere).denied).toBe(
+      true,
+    );
+    expect(bash(`rm ${posix}/acceptance/notes.spec.ts`, undefined, elsewhere).denied).toBe(true);
+    expect(
+      bash(`cd ${posix} && git commit -m "touches acceptance/"`, undefined, elsewhere).denied,
+    ).toBe(false);
+    expect(bash(`cd ${posix} && rm src/app.ts`, undefined, elsewhere).denied).toBe(false);
+  });
+
+  it.runIf(process.platform === "win32")("understands Git Bash paths such as /c/Users/...", () => {
+    const msys = repo
+      .replace(/\\/g, "/")
+      .replace(/^([A-Za-z]):/, (_, d: string) => `/${d.toLowerCase()}`);
+    expect(bash(`rm ${msys}/acceptance/notes.spec.ts`, undefined, fixtureRepo(null)).denied).toBe(
+      true,
+    );
+  });
+
+  it("denies wiping a protected path by naming a directory above it", () => {
+    for (const cmd of [
+      "rm -rf *",
+      "rm -rf .",
+      "git checkout .",
+      "git checkout main -- .",
+      "find . -name '*.ts' -delete",
+    ]) {
+      expect(bash(cmd).denied, cmd).toBe(true);
+    }
+    expect(bash("rm -rf src").denied).toBe(false);
+    expect(bash("git add .").denied).toBe(false);
+  });
+
   it("allows commit messages that mention protected paths, inline or in a heredoc", () => {
     const inline = `git add -A && git commit -q -m "Run order-check on every PR
 
