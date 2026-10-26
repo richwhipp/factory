@@ -5,7 +5,7 @@ import { parse } from "yaml";
 export const MANIFEST = join(".factory", "repo.yml");
 export const SPEC = ".factory/spec.md";
 
-export type Manifest = { acceptanceTests: string };
+export type Manifest = { acceptanceTests: string; defaultBranch: string };
 
 /** Walks up from `start` to the nearest directory holding a Repo manifest, or null if none. */
 export function findRepoRoot(start: string): string | null {
@@ -21,6 +21,7 @@ export function findRepoRoot(start: string): string | null {
 /** Reads the parts of the Repo manifest the Factory acts on. Throws on an unusable manifest. */
 export function readManifest(root: string): Manifest {
   const doc = parse(readFileSync(join(root, MANIFEST), "utf8")) as {
+    default_branch?: unknown;
     paths?: { acceptance_tests?: unknown };
   } | null;
   const acceptanceTests = doc?.paths?.acceptance_tests;
@@ -32,5 +33,6 @@ export function readManifest(root: string): Manifest {
       .trim()
       .replace(/\\/g, "/")
       .replace(/^\.\/|\/+$/g, ""),
+    defaultBranch: typeof doc?.default_branch === "string" ? doc.default_branch : "main",
   };
 }

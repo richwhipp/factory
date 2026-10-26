@@ -7,8 +7,12 @@ import { dirname, join, resolve } from "node:path";
 const cli = resolve(import.meta.dirname, "../dist/factory.mjs");
 
 /** Runs the `factory` CLI as a separate process, the way hooks and scripts call it. */
-export function factory(args: string[], opts: { stdin?: string; env?: NodeJS.ProcessEnv } = {}) {
+export function factory(
+  args: string[],
+  opts: { stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string } = {},
+) {
   const res = spawnSync(process.execPath, [cli, ...args], {
+    cwd: opts.cwd,
     input: opts.stdin ?? "",
     encoding: "utf8",
     env: { ...process.env, FACTORY_ROLE: "", ...opts.env },
@@ -25,6 +29,42 @@ export function fixtureRepo(manifest: string | null, files: Record<string, strin
     writeFileSync(join(root, path), content);
   }
   return root;
+}
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "Test",
+  GIT_AUTHOR_EMAIL: "test@example.com",
+  GIT_COMMITTER_NAME: "Test",
+  GIT_COMMITTER_EMAIL: "test@example.com",
+};
+
+/** A git Repo on disk, starting with one commit on `main` that holds the Repo manifest. */
+export function gitRepo(manifest = MANIFEST_V1) {
+  const root = fixtureRepo(manifest, { "src/app.ts": "", "acceptance/notes.spec.ts": "" });
+  const git = (...args: string[]) => {
+    const res = spawnSync("git", args, { cwd: root, encoding: "utf8", env: GIT_ENV });
+    if (res.status !== 0) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+    return res.stdout.trim();
+  };
+  git("init", "-q", "-b", "main");
+  git("add", "-A");
+  git("commit", "-q", "-m", "Initial Repo");
+
+  /** Writes (or, with `null`, deletes) the given files, then commits them. */
+  const commit = (message: string, files: Record<string, string | null>) => {
+    for (const [path, content] of Object.entries(files)) {
+      if (content === null) git("rm", "-q", path);
+      else {
+        mkdirSync(dirname(join(root, path)), { recursive: true });
+        writeFileSync(join(root, path), content);
+        git("add", path);
+      }
+    }
+    git("commit", "-q", "-m", message);
+  };
+
+  return { root, git, commit };
 }
 
 export const MANIFEST_V1 = `contract_version: 1
