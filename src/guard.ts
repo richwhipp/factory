@@ -92,19 +92,118 @@ function protectedFor(
   return { paths };
 }
 
-/** Splits a shell command into simple-command segments (good enough for a guard, not a parser). */
-function segments(command: string): string[] {
-  return command
-    .split(/\n|;|&&|\|\||\||&/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+/** One simple command: its source text, its words (quotes removed) and its redirect targets. */
+type Segment = { text: string; words: string[]; targets: string[] };
+
+/**
+ * Splits a shell command into simple commands, respecting quotes, backslashes and heredoc
+ * bodies (which are skipped). Good enough for a guard, not a full shell parser.
+ */
+function segments(command: string): Segment[] {
+  const out: Segment[] = [];
+  let text = "";
+  let word = "";
+  let inWord = false;
+  let words: string[] = [];
+  let targets: string[] = [];
+  let nextIsTarget = false;
+  let quote: string | null = null;
+  const heredocs: { delimiter: string; tabs: boolean }[] = [];
+
+  const endWord = () => {
+    if (!inWord) return;
+    (nextIsTarget ? targets : words).push(word);
+    nextIsTarget = false;
+    word = "";
+    inWord = false;
+  };
+  const endSegment = () => {
+    endWord();
+    if (words.length || targets.length) out.push({ text: text.trim(), words, targets });
+    text = "";
+    words = [];
+    targets = [];
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] as string;
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"' && i + 1 < command.length) word += command[++i];
+      else word += c;
+      text += c;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      inWord = true;
+      text += c;
+      continue;
+    }
+    if (c === "\\" && i + 1 < command.length) {
+      word += command[++i];
+      inWord = true;
+      text += c;
+      continue;
+    }
+    if (c === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+      const m = /^<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/.exec(command.slice(i));
+      if (m) {
+        endWord();
+        heredocs.push({ delimiter: m[3] as string, tabs: m[1] === "-" });
+        text += m[0];
+        i += m[0].length - 1;
+        continue;
+      }
+    }
+    if (c === "\n") {
+      endSegment();
+      for (const h of heredocs) i = endOfHeredoc(command, i + 1, h.delimiter, h.tabs);
+      heredocs.length = 0;
+      continue;
+    }
+    if (c === ";" || c === "&" || c === "|") {
+      endSegment();
+      continue;
+    }
+    if (c === ">") {
+      endWord();
+      text += c;
+      if (command[i + 1] === ">") text += command[++i];
+      if (command[i + 1] === "&") {
+        // `2>&1` and the like duplicate a descriptor; they write no file.
+        while (/[&\d-]/.test(command[i + 1] ?? "")) text += command[++i];
+      } else nextIsTarget = true;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      endWord();
+      text += c;
+      continue;
+    }
+    word += c;
+    inWord = true;
+    text += c;
+  }
+  endSegment();
+  return out;
 }
 
-const tokens = (segment: string) => segment.split(/\s+/).map((t) => t.replace(/^['"]|['"]$/g, ""));
+/** Index of the newline ending a heredoc body's delimiter line (or the end of the command). */
+function endOfHeredoc(command: string, from: number, delimiter: string, tabs: boolean): number {
+  let start = from;
+  while (start < command.length) {
+    const nl = command.indexOf("\n", start);
+    const end = nl === -1 ? command.length : nl;
+    const line = command.slice(start, end);
+    if ((tabs ? line.replace(/^\t+/, "") : line) === delimiter) return end;
+    start = end + 1;
+  }
+  return command.length;
+}
 
 export function isForcePush(command: string): boolean {
-  return segments(command).some((segment) => {
-    const t = tokens(segment);
+  return segments(command).some(({ words: t }) => {
     const git = t.indexOf("git");
     if (git === -1) return false;
     const push = t.indexOf("push", git + 1);
@@ -124,7 +223,8 @@ export function isForcePush(command: string): boolean {
 const READERS = new Set(
   "cat less more head tail grep egrep rg ls wc diff file stat echo printf".split(" "),
 );
-const GIT_READERS = new Set("log diff show status blame ls-files grep".split(" "));
+// `commit` and `add` record changes already made (and already guarded); they change no files.
+const GIT_READERS = new Set("log diff show status blame ls-files grep commit add".split(" "));
 
 function isReadOnly(t: string[]): boolean {
   const name = (t[0] ?? "").replace(/^.*\//, "");
@@ -148,17 +248,24 @@ function checkBash(command: string, root: string, cwd: string, paths: Protected[
   const absRoot = norm(root);
   // Working inside a protected directory, any command may touch it.
   const cwdHit = paths.find((p) => within(relCwd, p.rel));
-  for (const segment of segments(command)) {
-    const hit = cwdHit ?? paths.find((p) => mentions(norm(segment), p.rel, relCwd, absRoot));
-    if (!hit) continue;
-    if (/>/.test(segment) || !isReadOnly(tokens(segment))) {
-      return deny(`${hit.reason} (Bash command touching it: \`${segment}\`)`);
-    }
+  const named = (ws: string[]) =>
+    ws.length === 0
+      ? undefined
+      : (cwdHit ?? paths.find((p) => ws.some((w) => mentions(norm(w), p.rel, relCwd, absRoot))));
+  const blocked = (s: Segment, hit: Protected) =>
+    deny(`${hit.reason} (Bash command touching it: \`${s.text}\`)`);
+
+  for (const s of segments(command)) {
+    // Writing to a protected path through a redirect, whatever the command.
+    const targetHit = named(s.targets.filter((t) => !cwdHit || !isAbsolute(t)));
+    if (s.targets.length && targetHit) return blocked(s, targetHit);
+    const hit = named(s.words);
+    if (hit && !isReadOnly(s.words)) return blocked(s, hit);
   }
   return allow;
 }
 
-/** Whether a normalised command segment names a protected path: from the root, the cwd, or absolutely. */
+/** Whether a normalised word names a protected path: from the root, the cwd, or absolutely. */
 function mentions(segment: string, rel: string, relCwd: string, absRoot: string): boolean {
   const forms = new Set([rel, `${absRoot}/${rel}`]);
   if (relCwd && relCwd !== "." && rel.startsWith(`${relCwd}/`)) {

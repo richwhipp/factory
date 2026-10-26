@@ -186,9 +186,37 @@ describe("guard: Bash", () => {
     expect(bash("pnpm run verify && git commit -am 'Build notes'").denied).toBe(false);
   });
 
+  it("allows commit messages that mention protected paths, inline or in a heredoc", () => {
+    const inline = `git add -A && git commit -q -m "Run order-check on every PR
+
+Fails the PR if a later commit touches acceptance/ or
+the Spec (.factory/spec.md)." && git push -q`;
+    expect(bash(inline).denied).toBe(false);
+
+    const heredoc = `git commit -F - <<'EOF'
+Touches acceptance/notes.spec.ts > nowhere
+rm acceptance/notes.spec.ts
+EOF
+git log -1`;
+    expect(bash(heredoc).denied).toBe(false);
+  });
+
+  it("still sees protected paths inside quotes, and redirects into them", () => {
+    expect(bash(`rm "acceptance/notes.spec.ts"`).denied).toBe(true);
+    expect(bash("cat <<'EOF' > acceptance/x.spec.ts\ntest\nEOF").denied).toBe(true);
+    expect(bash("printf x >> acceptance/notes.spec.ts").denied).toBe(true);
+  });
+
+  it("allows descriptor redirects such as 2>&1 alongside a test run", () => {
+    expect(bash("pnpm exec playwright test acceptance/notes.spec.ts 2>&1 | tail -5").denied).toBe(
+      false,
+    );
+  });
+
   it("treats every command run from inside the Acceptance tests directory as touching it", () => {
     const inside = join(repo, "acceptance");
     expect(bash("rm notes.spec.ts", undefined, inside).denied).toBe(true);
     expect(bash("cat notes.spec.ts", undefined, inside).denied).toBe(false);
+    expect(bash("echo x > notes.spec.ts", undefined, inside).denied).toBe(true);
   });
 });
